@@ -1,8 +1,6 @@
-from typing import Generator
-
 import scrapy
 
-from gh_collections.items import CollectionItem, RepositoryItem
+from gh_collections.items import CollectionItem, RepositoryItem, FileItem
 
 
 class GHCollectionsSpider(scrapy.Spider):
@@ -42,7 +40,7 @@ class GHCollectionsSpider(scrapy.Spider):
         # Parse each of the collection pages using parse_collection method
 
         # Change line for debugging
-        # for article in response.css("article a::attr(href)")[0:1]:
+        # for article in response.css("article a::attr(href)")[4:5]:
         for article in response.css("article a::attr(href)"):
             yield scrapy.Request(
                 self.base_url + article.get(), callback=self.parse_collection
@@ -74,6 +72,7 @@ class GHCollectionsSpider(scrapy.Spider):
 
         # For each repository listed in collection, retrieve it and send it to the
         # parse_repository method
+        # for article in response.css("article h1 a::attr(href)")[6:7]:
         for article in response.css("article h1 a::attr(href)"):
             yield scrapy.Request(
                 self.base_url + article.get(),
@@ -87,9 +86,7 @@ class GHCollectionsSpider(scrapy.Spider):
             {
                 "url": collection_url,
                 "name": response.css("h1.lh-condensed.mb-3::text").get(),
-                "description": response.css(
-                    "f3.color-fg-muted.lh-condensed.mb-3::text"
-                ).get(),
+                "description": response.css("div.f3::text").get(),
             }
         )
         yield collection
@@ -104,20 +101,77 @@ class GHCollectionsSpider(scrapy.Spider):
         Returns
         - Generator that yields RepositoryItems to be processed by the item pipeline
         """
+
+        # Numeric info from the sidebar on the right
+        info = response.css("a.Link.Link--muted strong::text")
+
+        # Commit information
+        commits = response.css("tbdoy tr td span.fgColor-default::text").get()
+        commits = commits.strip()[0] if commits is not None else None
+
+        # Parse each of the files/directories available
+        for element in self.get_element_list(response):
+            element_name = element.css("::text").get()
+            element_description = element.attrib["aria-label"].split(", ")[-1].strip()
+            element_url = self.base_url + element.attrib["href"]
+
+            if element_description == "(Directory)":
+                yield scrapy.Request(
+                    element_url,
+                    callback=self.parse_directory,
+                    meta={
+                        "repository_url": response.url,
+                    },
+                )
+
+            elif element_description == "(File)":
+                yield FileItem(
+                    {
+                        "url": element_url,
+                        "repository_url": response.url,
+                        "parent_url": response.url,
+                        "name": element_name,
+                    }
+                )
+
+        # Return RepositoryItem information
         yield RepositoryItem(
             {
                 "collection_url": response.meta["collection_url"],
                 "url": response.url,
                 "name": response.css("div strong a::text").get(),
                 "description": response.css("p.f4.my-3::text").get(default="").strip(),
+                "stargazers": info[0].get(),
+                "watchers": info[1].get(),
+                "forks": info[2].get(),
+                "commits": commits,
             }
         )
 
-    def parse_directory(self):
-        # Iterate over directories/files
-        #     If file -> Send to parse_file
-        #     If directory -> Send to parse_directory (RECURSIVE)
-        pass
+    def parse_directory(self, response):
+        for element in self.get_element_list(response):
+            element_name = element.css("::text").get()
+            element_description = element.attrib["aria-label"].split(", ")[-1].strip()
+            element_url = self.base_url + element.attrib["href"]
+
+            if element_description == "(Directory)":
+                yield scrapy.Request(
+                    element_url,
+                    callback=self.parse_directory,
+                    meta={
+                        "repository_url": response.meta["repository_url"],
+                    },
+                )
+
+            elif element_description == "(File)":
+                yield FileItem(
+                    {
+                        "url": element_url,
+                        "repository_url": response.meta["repository_url"],
+                        "parent_url": response.url,
+                        "name": element_name,
+                    }
+                )
 
     def parse_file(self):
         # Get all data from file page
@@ -159,3 +213,17 @@ class GHCollectionsSpider(scrapy.Spider):
         # Change line for debugging
         return True if len(response.css("button.ajax-pagination-btn")) else False
         # return False
+
+    def get_element_list(self, response):
+        """
+        Returns list of files/directories available in the response page.
+
+        Args:
+        - response: A Scrapy response object.
+
+        Returns
+        - list: List of selectors of the elements
+        """
+        return response.css(
+            "table div.react-directory-filename-column a.Link--primary"
+        )[::2]
